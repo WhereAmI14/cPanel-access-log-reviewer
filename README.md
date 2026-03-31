@@ -23,6 +23,7 @@ The entrypoint is the root-level bootstrap script `logs-reviewer.sh` which stage
 - Automatic inclusion of rotated archives when the requested timeframe exceeds active-log coverage
 - Compact mode for servers with many domains
 - Full summary output for a single selected domain without printing every domain first
+- Automatic PTR-host grouping protection for large unique-IP sets, with manual override
 
 ## Quick Start
 
@@ -92,6 +93,7 @@ bash logs-reviewer.sh --threshold 50
 - `--archive-domain`: choose one archived domain log name for archive inspection.
 - `-d`, `--domain`: choose one live domain log name for raw inspect mode.
 - `-u`, `--user`: when running as `root`, limit discovery to one cPanel user instead of scanning all users.
+- `--ptr`: PTR lookup mode for summaries: `auto` (default), `on`, or `off`.
 - `--threshold`: set the maximum number of domains that will be printed inline before compact mode is enabled.
 - `-h`, `--help`: show usage information.
 
@@ -141,4 +143,5 @@ The original Bash-only implementation is still available in `bash-variant/README
 
 - The tool reads both standard and SSL access logs for a selected domain.
 - When the requested timeframe reaches further back than the active logs cover, the tool can include matching rotated archives automatically.
+- In the default `--ptr auto` mode, the script still shows PTR data for small top-row views, but skips the full grouped PTR section when the unique-IP set is large enough to make reverse-DNS lookups expensive.
 - If you are piping the bootstrap script into Bash and need to pass options, always use `bash -s -- ...`.

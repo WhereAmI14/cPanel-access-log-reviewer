@@ -6,3 +6,5 @@
 *.swp
 *~
 __pycache__/
+test-env/
+tools/

@@ -57,11 +57,13 @@ USE_COLOR = use_color()
 GREEN = "\033[32;1m" if USE_COLOR else ""
 YELLOW = "\033[33;1m" if USE_COLOR else ""
 CYAN = "\033[36;1m" if USE_COLOR else ""
+BLUE = "\033[34m" if USE_COLOR else ""
 RED = "\033[31;1m" if USE_COLOR else ""
 BOLD = "\033[1m" if USE_COLOR else ""
 DEF = "\033[0m" if USE_COLOR else ""
 PTR_TIMEOUT = 2.0
 HTTP_TIMEOUT = 3.0
+PTR_AUTO_GROUP_LIMIT = 200
 
 
 def print_bold(text):
@@ -73,6 +75,19 @@ def print_bold(text):
 
 def print_empty():
     print("  (none)")
+
+
+def print_table_header(text):
+    if USE_COLOR:
+        print(f"{BLUE}{BOLD}{text}{DEF}")
+    else:
+        print(text)
+
+
+def format_interval_utc(start_epoch, seconds):
+    start = datetime.fromtimestamp(start_epoch, timezone.utc)
+    end = datetime.fromtimestamp(start_epoch + seconds - 1, timezone.utc)
+    return f"{start.strftime('%Y-%m-%d %H:%M:%S')} - {end.strftime('%H:%M:%S')} UTC"
 
 
 def print_heading_block(text):
@@ -91,6 +106,15 @@ def colorize_status(status):
     if status[0] in table:
         return f"{table[status[0]]}{status}{DEF}"
     return status
+
+
+def format_int(value):
+    return f"{value:,}"
+
+
+def format_int_field(value, width):
+    text = format_int(value)
+    return text.rjust(max(width, len(text)))
 
 
 def iter_lines(path):
@@ -358,6 +382,7 @@ def summarize_stream(path, cutoff_epoch):
         "top4xx": collections.Counter(),
         "top5xx": collections.Counter(),
         "minute_counter": collections.Counter(),
+        "minute_epoch_counter": collections.Counter(),
         "bot_counter": collections.Counter(),
         "bot_requests": 0,
         "error_pair_counts": collections.Counter(),
@@ -379,6 +404,8 @@ def summarize_stream(path, cutoff_epoch):
 
         if record["time"]:
             summary["minute_counter"][record["time"][:17]] += 1
+        if record["epoch"] is not None:
+            summary["minute_epoch_counter"][record["epoch"] - (record["epoch"] % 60)] += 1
         if record["referrer"] != "-":
             summary["ref_counter"][record["referrer"]] += 1
 
@@ -436,6 +463,24 @@ def resolve_ptr(ip):
 
     PTR_CACHE[ip] = host
     return host
+
+
+def ptr_enabled(args):
+    return args.ptr_mode != "off"
+
+
+def ptr_grouping_enabled(args, unique_ips):
+    if args.ptr_mode == "off":
+        return False
+    if args.ptr_mode == "on":
+        return True
+    return unique_ips <= args.ptr_auto_limit
+
+
+def ptr_host_for_ip(ip, args):
+    if not ptr_enabled(args):
+        return "-"
+    return resolve_ptr(ip)
 
 
 def http_json(url):
@@ -529,24 +574,35 @@ def print_counted_table(rows, value_label, max_len):
     if not rows:
         print_empty()
         return
-    print_bold(f"{'Count':>8}  {value_label}")
+    print_table_header(f"{'Count':>8}  {value_label}")
     for value, count in rows:
         value = str(value)
         if max_len > 3 and len(value) > max_len:
             value = value[: max_len - 3] + "..."
-        print(f"{count:8d}  {value}")
+        print(f"{format_int_field(count, 8)}  {value}")
 
 
-def print_top_ips(ip_counts):
+def print_top_ips(ip_counts, args):
     rows = ip_counts.most_common(10)
-    print_bold(f"{'Count':>8}  {'IP':<39} {'PTR Host':<42} Org / ISP")
+    print_table_header(f"{'Count':>8}  {'IP':<39} {'PTR Host':<42} Org / ISP")
     for ip, count in rows:
-        host = resolve_ptr(ip)
+        host = ptr_host_for_ip(ip, args)
         org = resolve_org(ip)
-        print(f"{count:8d}  {ip:<39} {host:<42} {org}")
+        print(f"{format_int_field(count, 8)}  {ip:<39} {host:<42} {org}")
 
 
-def print_grouped_ptr(ip_counts, label):
+def print_grouped_ptr(ip_counts, label, args):
+    unique_ips = len(ip_counts)
+    if args.ptr_mode == "off":
+        print("PTR lookups disabled with --ptr off.")
+        return
+    if not ptr_grouping_enabled(args, unique_ips):
+        print(
+            f"Skipped in auto mode: {format_int(unique_ips)} unique IPs exceeds PTR grouping limit "
+            f"{format_int(args.ptr_auto_limit)}. Rerun with --ptr on to force PTR host grouping."
+        )
+        return
+
     grouped = collections.defaultdict(lambda: {"requests": 0, "ips": set()})
     for ip, count in ip_counts.items():
         host = resolve_ptr(ip)
@@ -563,9 +619,9 @@ def print_grouped_ptr(ip_counts, label):
         print_empty()
         return
 
-    print_bold(f"{'Requests':>8}  {'Unique IPs':>9}  {label}")
+    print_table_header(f"{'Requests':>8}  {'Unique IPs':>9}  {label}")
     for requests, ips, key in rows:
-        print(f"{requests:8d}  {ips:9d}  {key}")
+        print(f"{format_int_field(requests, 8)}  {format_int_field(ips, 9)}  {key}")
 
 
 def print_status_codes(status_counts, total_requests):
@@ -574,23 +630,56 @@ def print_status_codes(status_counts, total_requests):
         print_empty()
         return
 
-    print_bold(f"{'Count':>8}  {'Percent':>7}  Status")
+    print_table_header(f"{'Count':>8}  {'Percent':>7}  Status")
     for status, count in rows:
         pct = (count * 100.0 / total_requests) if total_requests else 0.0
-        print(f"{count:8d}  {pct:6.2f}%  {colorize_status(status)}")
+        print(f"{format_int_field(count, 8)}  {pct:6.2f}%  {colorize_status(status)}")
 
 
-def print_error_pairs(error_pair_counts):
+def print_error_pairs(error_pair_counts, args):
     rows = error_pair_counts.most_common(10)
     if not rows:
         print_empty()
         return
 
-    print_bold(f"{'Count':>8}  {'IP':<39} {'PTR Host':<40} {'Org / ISP':<22} Status")
+    print_table_header(f"{'Count':>8}  {'IP':<39} {'PTR Host':<40} {'Org / ISP':<22} Status")
     for (ip, status), count in rows:
-        host = resolve_ptr(ip)
+        host = ptr_host_for_ip(ip, args)
         org = resolve_org(ip)
-        print(f"{count:8d}  {ip:<39} {host:<40} {org:<22} {colorize_status(status)}")
+        print(f"{format_int_field(count, 8)}  {ip:<39} {host:<40} {org:<22} {colorize_status(status)}")
+
+
+def top_time_windows(counter, window_minutes, top_n=5):
+    starts = sorted(counter)
+    rows = []
+    for start in starts:
+        total = sum(counter.get(start + offset * 60, 0) for offset in range(window_minutes))
+        rows.append((start, total))
+    rows.sort(key=lambda item: (-item[1], item[0]))
+    return rows[:top_n]
+
+
+def print_time_window_table(counter, window_minutes):
+    rows = top_time_windows(counter, window_minutes)
+    if not rows:
+        print("n/a")
+        return
+
+    print_table_header(f"{'Requests':>8}  {'Req/s':>7}  Interval (UTC)")
+    window_seconds = window_minutes * 60
+    for start_epoch, count in rows:
+        print(
+            f"{format_int_field(count, 8)}  {count / window_seconds:6.2f}  "
+            f"{format_interval_utc(start_epoch, window_seconds)}"
+        )
+
+
+def print_peak_bursts(summary):
+    print("1-minute windows")
+    print_time_window_table(summary["minute_epoch_counter"], 1)
+    print()
+    print("5-minute rolling windows")
+    print_time_window_table(summary["minute_epoch_counter"], 5)
 
 
 def summary_metrics_row(summary, domain):
@@ -669,7 +758,7 @@ def print_domain_rollup_table(rows, columns):
 
     header = "  ".join(f"{title:>{width}}" for title, _, width in columns[:-1])
     header = f"{header}  {columns[-1][0]}"
-    print_bold(header)
+    print_table_header(header)
 
     for row in rows:
         parts = []
@@ -678,7 +767,7 @@ def print_domain_rollup_table(rows, columns):
             if isinstance(value, float):
                 parts.append(f"{value:>{width}.2f}")
             else:
-                parts.append(f"{value:>{width}}")
+                parts.append(format_int_field(value, width))
         print(f"{'  '.join(parts)}  {row[columns[-1][1]]}")
 
 
@@ -748,23 +837,23 @@ def run_summary(args):
         print("No data for selected timeframe")
         return 0
 
-    total_bytes = summary["total_bytes"]
     unique_ips = len(summary["ip_counts"])
-    avg_bytes = total_bytes / total_requests if total_requests else 0.0
 
     print_heading_block(args.heading)
-    print(f"Requests: {total_requests}")
-    print(f"Unique IPs: {unique_ips}")
-    print(f"Transferred bytes: {total_bytes}")
-    print(f"Average response bytes: {avg_bytes:.2f}")
+    print(f"Requests: {format_int(total_requests)}")
+    print(f"Unique IPs: {format_int(unique_ips)}")
+
+    print()
+    print(f"{GREEN}Peak Traffic Bursts{DEF}")
+    print_peak_bursts(summary)
 
     print()
     print(f"{GREEN}Top IPs{DEF}")
-    print_top_ips(summary["ip_counts"])
+    print_top_ips(summary["ip_counts"], args)
 
     print()
     print(f"{GREEN}Top PTR Hosts{DEF}")
-    print_grouped_ptr(summary["ip_counts"], "PTR Host Group")
+    print_grouped_ptr(summary["ip_counts"], "PTR Host Group", args)
 
     print()
     print(f"{GREEN}Top URLs{DEF}")
@@ -781,7 +870,7 @@ def run_summary(args):
     print()
     print(f"{GREEN}Bots{DEF}")
     bot_pct = (summary["bot_requests"] * 100.0 / total_requests) if total_requests else 0.0
-    print(f"Bot requests: {summary['bot_requests']} ({bot_pct:.2f}%)")
+    print(f"Bot requests: {format_int(summary['bot_requests'])} ({bot_pct:.2f}%)")
     print_counted_table(summary["bot_counter"].most_common(10), "User Agent", 110)
 
     print()
@@ -798,18 +887,8 @@ def run_summary(args):
 
     print()
     print(f"{GREEN}Top Error IP/Status Pairs{DEF}")
-    print_error_pairs(summary["error_pair_counts"])
+    print_error_pairs(summary["error_pair_counts"], args)
 
-    print()
-    print(f"{GREEN}Peak Minute Burst{DEF}")
-    if summary["minute_counter"]:
-        minute, count = max(
-            summary["minute_counter"].items(),
-            key=lambda item: (item[1], item[0]),
-        )
-        print(f"{minute} ({count} requests)")
-    else:
-        print("n/a")
     return 0
 
 
@@ -841,6 +920,8 @@ def main():
     parser.add_argument("--base-name", default="")
     parser.add_argument("--domain", default="")
     parser.add_argument("--top-n", type=int, default=10)
+    parser.add_argument("--ptr-mode", choices=("auto", "on", "off"), default="auto")
+    parser.add_argument("--ptr-auto-limit", type=int, default=PTR_AUTO_GROUP_LIMIT)
     args = parser.parse_args()
 
     if args.mode == "summary":

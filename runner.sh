@@ -37,6 +37,7 @@ LOG_USER_INPUT=""
 FULL_DOMAIN_INPUT=""
 MAX_DOMAINS_INLINE=20
 TOP_DOMAIN_ROWS=10
+PTR_MODE_INPUT="auto"
 
 declare -a BASE_LOGS=()
 declare -a ARCHIVE_LOGS=()
@@ -61,6 +62,7 @@ Options:
       --archive-domain N   Domain log name for archive inspect
   -d, --domain NAME        Domain log name for inspect mode
   -u, --user USER          Username to read logs from /home/USER/access-logs or /home/USER/access_logs
+      --ptr MODE           PTR lookup mode: auto, on, or off (default: auto)
   -h, --help               Show this help
 
 Notes:
@@ -119,6 +121,14 @@ while [[ $# -gt 0 ]]; do
     -u|--user)
       [[ $# -lt 2 ]] && { echo "Missing value for $1" >&2; exit 2; }
       LOG_USER_INPUT="$2"
+      shift 2
+      ;;
+    --ptr)
+      [[ $# -lt 2 ]] && { echo "Missing value for $1" >&2; exit 2; }
+      case "$2" in
+        auto|on|off) PTR_MODE_INPUT="$2" ;;
+        *) echo "Invalid value for $1: $2" >&2; exit 2 ;;
+      esac
       shift 2
       ;;
     -h|--help)
@@ -433,6 +443,7 @@ print_python_summary_from_stream() {
     --mode summary \
     --heading "$heading" \
     --cutoff-epoch "$CUTOFF_EPOCH" \
+    --ptr-mode "$PTR_MODE_INPUT" \
     "$@"
 }
 
